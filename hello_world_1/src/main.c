@@ -500,7 +500,7 @@ static struct ina219_data my_ina219;  // 新的 INA219 資料結構
 
 /* 传感器数据刷新时间 */
 #define SENSOR_SAMPLE_INTERVAL K_MSEC(1)
-#define ICM_SENSOR_SAMPLE_INTERVAL K_MSEC(1)
+#define ICM_SENSOR_SAMPLE_INTERVAL K_MSEC(9)
 
 /* INA219 配置參數 */
 #define INA219_SHUNT_RESISTANCE    0.1f    // 0.1歐姆分流電阻
@@ -590,7 +590,7 @@ typedef struct {
 /* 數據濾波器 */
 static FirstOrderFilter mag_x_filter = {
     .prev_output = 0.0f,
-    .alpha = 0.25f,        // 預設α值，可根據需求調整
+    .alpha = 0.05f,        // 預設α值，可根據需求調整
     .initialized = 0
 };
 
@@ -654,29 +654,45 @@ typedef struct {
     float last_peak_time;
     float period;
     float last_mag;
+    float current_sum;
+    int current_count;
+    int state_count;
 } PeriodDetector;
 
-float detect_period(PeriodDetector *detector, float current_mag, float current_time) {
+bool detect_period(PeriodDetector *detector, float current_mag, float current_time, float current) {
     float diff = current_mag - detector->last_mag;
     
     // 使用閾值避免噪聲造成的誤判
     if (fabs(diff) < detector->threshold) {
-        return detector->period;
+        return false;
     }
     
     SignalState new_state = (diff > 0) ? STATE_RISING : STATE_FALLING;
-    
-    // 檢測由上升轉為下降（峰值）
-    if (detector->state == STATE_RISING && new_state == STATE_FALLING) {
-        if (detector->last_peak_time > 0) {
-            detector->period = current_time - detector->last_peak_time;
-            // printf("----------Detected period: %.4f seconds----------\n", detector->period);
-        }
+    if (new_state == STATE_FALLING && detector->state == STATE_RISING && detector->state_count == 0) {
+        detector->state_count = 1;
         detector->last_peak_time = current_time;
+    }
+    else if (new_state == STATE_FALLING && detector->state == STATE_RISING && detector->state_count == 1) {
+        detector->state_count = 2;
+    }
+    if (detector->state_count == 1){
+        detector->current_sum += current;
+        detector->current_count++;
+    }
+    else if (detector->state_count == 2){
+        detector->period = current_time - detector->last_peak_time;
+        float average_current = detector->current_sum / detector->current_count;
+        printf("----------Average Current during one period: %.4f mA----------\n", average_current);
+        printf("----------Period: %.4f s----------\n", detector->period);
+        printf("----------current time: %.4f s----------\n", current_time);
+        printf("----------last peak time: %.4f s----------\n", detector->last_peak_time);
+        detector->current_sum = 0.0f;
+        detector->current_count = 0;
+        detector->state_count = 0;
     }
     detector->last_mag = current_mag;
     detector->state = new_state;
-    return detector->period;
+    return false;
 }
 
 /* 週期檢測器實例 */
@@ -685,7 +701,10 @@ PeriodDetector cycle_detector = {
     .state = STATE_UNKNOWN,
     .last_peak_time = 0.0f,
     .period = 0.0f,
-    .last_mag = 0.0f
+    .last_mag = 0.0f,
+    .current_sum = 0.0f,
+    .current_count = 0,
+    .state_count = 0
 };
 /* 初始化 ICM20948 */
 static int new_icm20948_init(void) {
@@ -854,7 +873,7 @@ void icm20948_read_thread_entry(void *dummy0, void *dummy1, void *dummy2) {
 
     xyzFloat_t mag_xyz_data;
     // moving_average_init(&mag_x_filter, MAG_MOVING_AVG_SIZE);
-    first_order_filter_init(&mag_x_filter, 0.05f); // 初始化一階濾波器，α值可調整
+    first_order_filter_init(&mag_x_filter, 0.1f); // 初始化一階濾波器，α值可調整
     uint32_t start_time_icm = k_uptime_get_32();
 
     LOG_INF("ICM20948 thread started");
@@ -889,7 +908,6 @@ void icm20948_read_thread_entry(void *dummy0, void *dummy1, void *dummy2) {
         motor_data.mag_sample_time = elapsed_seconds_icm;
         motor_data.filtered_mag_x = filtered_mag_x_val;
         k_mutex_unlock(&motor_data_mutex);
-        // float detected_period = detect_period(&cycle_detector, filtered_mag_x_val, elapsed_seconds_icm);
         // 輸出資料
         k_mutex_lock(&uart_mutex, K_FOREVER);
         printf("T1:%.4f\n"
@@ -901,6 +919,7 @@ void icm20948_read_thread_entry(void *dummy0, void *dummy1, void *dummy2) {
                (double)elapsed_seconds_icm, 
                (double)filtered_mag_x_val);
         k_mutex_unlock(&uart_mutex);
+        bool detected_period = detect_period(&cycle_detector, filtered_mag_x_val, elapsed_seconds_icm, motor_data.current);
 
         k_sleep(ICM_SENSOR_SAMPLE_INTERVAL);
 
