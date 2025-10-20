@@ -530,6 +530,7 @@ K_MUTEX_DEFINE(i2c_mutex);
 struct shared_data {
     float current;
     float filtered_mag_x;
+    float voltage;
     float mag_sample_time;
     float cur_sample_time;
 };
@@ -590,7 +591,7 @@ typedef struct {
 /* 數據濾波器 */
 static FirstOrderFilter mag_x_filter = {
     .prev_output = 0.0f,
-    .alpha = 0.05f,        // 預設α值，可根據需求調整
+    .alpha = 0.25f,        // 預設α值，可根據需求調整
     .initialized = 0
 };
 
@@ -655,11 +656,15 @@ typedef struct {
     float period;
     float last_mag;
     float current_sum;
+    float current_start;
+    float current_end;
     int current_count;
     int state_count;
 } PeriodDetector;
 
-bool detect_period(PeriodDetector *detector, float current_mag, float current_time, float current) {
+
+/*週期檢測算法-斜率判斷法*/
+bool detect_period(PeriodDetector *detector, float current_mag, float current_time, float current, float voltage) {
     float diff = current_mag - detector->last_mag;
     
     // 使用閾值避免噪聲造成的誤判
@@ -676,19 +681,30 @@ bool detect_period(PeriodDetector *detector, float current_mag, float current_ti
         detector->state_count = 2;
     }
     if (detector->state_count == 1){
+        if (detector->current_count == 0) {
+            detector->current_start = current;
+        }
         detector->current_sum += current;
         detector->current_count++;
     }
     else if (detector->state_count == 2){
+        detector->current_end = current;
         detector->period = current_time - detector->last_peak_time;
         float average_current = detector->current_sum / detector->current_count;
         printf("----------Average Current during one period: %.4f mA----------\n", average_current);
+        printf("----------Current Sum: %.4f mA----------\n", detector->current_sum);
+        printf("----------Current Count: %d----------\n", detector->current_count);
+        printf("----------Current Start: %.4f mA----------\n", detector->current_start);
+        printf("----------Current End: %.4f mA----------\n", detector->current_end);
         printf("----------Period: %.4f s----------\n", detector->period);
         printf("----------current time: %.4f s----------\n", current_time);
         printf("----------last peak time: %.4f s----------\n", detector->last_peak_time);
+        printf("----------power: %.4f mW----------\n", voltage * average_current);
+        printf("----------energy: %.4f mJ----------\n", voltage * average_current * detector->period);
         detector->current_sum = 0.0f;
         detector->current_count = 0;
-        detector->state_count = 0;
+        detector->state_count = 1;  // 重置為1以繼續檢測下一個週期
+        detector->last_peak_time = current_time;
     }
     detector->last_mag = current_mag;
     detector->state = new_state;
@@ -703,9 +719,40 @@ PeriodDetector cycle_detector = {
     .period = 0.0f,
     .last_mag = 0.0f,
     .current_sum = 0.0f,
+    .current_start = 0.0f,
+    .current_end = 0.0f,
     .current_count = 0,
     .state_count = 0
 };
+
+typedef struct {
+    float last_value;
+    float threshold;
+    int data_count;
+} ICM20948Filter;
+float icm20948_filter(ICM20948Filter *filter, float new_value){
+    if (filter->data_count == 0){
+        filter->last_value = new_value;
+        filter->data_count++;
+        return new_value;
+    }
+    if (filter->data_count > 0){
+        float diff = fabs(new_value - filter->last_value);
+        if (diff > filter->threshold){
+            return filter->last_value + 10.0f;
+        }
+        filter->last_value = new_value;
+        return new_value;
+
+    }
+}
+
+ICM20948Filter icm20948_filter_x = {
+    .last_value = 0.0f,
+    .threshold = 200.0f,  // 根據需求調整閾值
+    .data_count = 0
+};
+
 /* 初始化 ICM20948 */
 static int new_icm20948_init(void) {
     int ret;
@@ -844,6 +891,7 @@ void ina219_read_thread_entry(void *arg1, void *arg2, void *arg3) {
         k_mutex_lock(&motor_data_mutex, K_FOREVER);
         motor_data.cur_sample_time = elapsed_seconds;
         motor_data.current = filtered_current;
+        motor_data.voltage = bus_voltage + shunt_voltage / 1000.0f; // 將分流電壓轉換為伏特並加到總電壓
         k_mutex_unlock(&motor_data_mutex);
 
         // 偵錯輸出（可選）
@@ -873,7 +921,7 @@ void icm20948_read_thread_entry(void *dummy0, void *dummy1, void *dummy2) {
 
     xyzFloat_t mag_xyz_data;
     // moving_average_init(&mag_x_filter, MAG_MOVING_AVG_SIZE);
-    first_order_filter_init(&mag_x_filter, 0.1f); // 初始化一階濾波器，α值可調整
+    // first_order_filter_init(&mag_x_filter, 0.05f); // 初始化一階濾波器，α值可調整
     uint32_t start_time_icm = k_uptime_get_32();
 
     LOG_INF("ICM20948 thread started");
@@ -902,7 +950,8 @@ void icm20948_read_thread_entry(void *dummy0, void *dummy1, void *dummy2) {
         float elapsed_seconds_icm = (float)(current_time_icm_ticks - start_time_icm) / 1000.0f;
 
         // float filtered_mag_x_val = moving_average_add(&mag_x_filter, current_mag_x, MAG_MOVING_AVG_SIZE);
-        float filtered_mag_x_val = first_order_filter_apply(&mag_x_filter, current_mag_x);
+        float icm_filtered_x = icm20948_filter(&icm20948_filter_x, current_mag_x);
+        float filtered_mag_x_val = first_order_filter_apply(&mag_x_filter, icm_filtered_x);
 
         k_mutex_lock(&motor_data_mutex, K_FOREVER);
         motor_data.mag_sample_time = elapsed_seconds_icm;
@@ -919,7 +968,7 @@ void icm20948_read_thread_entry(void *dummy0, void *dummy1, void *dummy2) {
                (double)elapsed_seconds_icm, 
                (double)filtered_mag_x_val);
         k_mutex_unlock(&uart_mutex);
-        bool detected_period = detect_period(&cycle_detector, filtered_mag_x_val, elapsed_seconds_icm, motor_data.current);
+        // bool detected_period = detect_period(&cycle_detector, filtered_mag_x_val, elapsed_seconds_icm, motor_data.current, motor_data.voltage);
 
         k_sleep(ICM_SENSOR_SAMPLE_INTERVAL);
 
