@@ -895,11 +895,11 @@ void ina219_read_thread_entry(void *arg1, void *arg2, void *arg3) {
         k_mutex_unlock(&motor_data_mutex);
 
         // 偵錯輸出（可選）
-        if ((current_time_ticks % 1000) < 50) { // 每秒輸出一次
-            LOG_DBG("INA219: Current=%.2f mA, Voltage=%.2f V, Shunt=%.2f mV, Power=%.2f mW",
-                    (double)current_mA, (double)bus_voltage, 
-                    (double)shunt_voltage, (double)power_mW);
-        }
+        // if ((current_time_ticks % 1000) < 50) { // 每秒輸出一次
+        //     LOG_DBG("INA219: Current=%.2f mA, Voltage=%.2f V, Shunt=%.2f mV, Power=%.2f mW",
+        //             (double)current_mA, (double)bus_voltage, 
+        //             (double)shunt_voltage, (double)power_mW);
+        // }
 
         k_sleep(SENSOR_SAMPLE_INTERVAL);
 
@@ -944,6 +944,8 @@ void icm20948_read_thread_entry(void *dummy0, void *dummy1, void *dummy2) {
             }
         } else {
             LOG_ERR("Failed to read sensor data: %d", ret_icm);
+            // 測試printf和LOG_ERR間的區別
+            // printf("Failed to read sensor data from new ICM driver: %d\n", ret_icm);
         }
 
         uint32_t current_time_icm_ticks = k_uptime_get_32();
