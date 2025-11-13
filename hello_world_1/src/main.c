@@ -499,7 +499,7 @@ static icm20948_dev_t my_icm_sensor;
 static struct ina219_data my_ina219;  // 新的 INA219 資料結構
 
 /* 传感器数据刷新时间 */
-#define SENSOR_SAMPLE_INTERVAL K_MSEC(1)
+#define SENSOR_SAMPLE_INTERVAL K_MSEC(3)
 #define ICM_SENSOR_SAMPLE_INTERVAL K_MSEC(9)
 
 /* INA219 配置參數 */
@@ -522,7 +522,7 @@ K_MUTEX_DEFINE(uart_mutex);
 K_MUTEX_DEFINE(i2c_mutex);
 
 /* 移动平均窗口大小 */
-#define CURRENT_FILTER_SIZE 5
+#define CURRENT_FILTER_SIZE 8
 #define SLOPE_FILTER_SIZE 5
 #define MAG_MOVING_AVG_SIZE 5
 
@@ -776,6 +776,11 @@ static int new_icm20948_init(void) {
     if (ret == 0) {
         LOG_INF("ICM20948 WhoAmI: 0x%02X", whoami_val);
     }
+    ret = icm20948_disable_accel_and_gyro(&my_icm_sensor);
+    if (ret != 0) {
+        LOG_ERR("Failed to disable accel and gyro: %d", ret);
+        return ret;
+    }
 
     ret = icm20948_init_magnetometer(&my_icm_sensor);
     if (ret != 0) {
@@ -826,7 +831,7 @@ static int new_ina219_init(void) {
 
     // 設定 ADC 模式為 128 樣本平均（最高精度）
     // 這對於您的 AC/DC 分析很重要
-    ret = ina219_set_adc_mode(&my_ina219, INA219_ADC_12BIT_16S, INA219_ADC_12BIT_16S);
+    ret = ina219_set_adc_mode(&my_ina219, INA219_ADC_12BIT, INA219_ADC_12BIT);
     if (ret != 0) {
         LOG_ERR("Failed to set INA219 ADC mode: %d", ret);
         return ret;
@@ -880,17 +885,20 @@ void ina219_read_thread_entry(void *arg1, void *arg2, void *arg3) {
         float shunt_voltage = ina219_read_shunt_voltage(&my_ina219);
         float power_mW = ina219_read_power(&my_ina219);
         k_mutex_unlock(&i2c_mutex);
+        uint32_t current_time_ticks = k_uptime_get_32();
 
         // 應用移動平均濾波
         float filtered_current = moving_average_add(&current_filter, current_mA, CURRENT_FILTER_SIZE);
+        // 應用一階平滑濾波
+        float double_filtered_current = first_order_filter_apply(&mag_y_filter, filtered_current);
 
-        uint32_t current_time_ticks = k_uptime_get_32();
+        // uint32_t current_time_ticks = k_uptime_get_32();
         float elapsed_seconds = (float)(current_time_ticks - start_time) / 1000.0f;
 
         // 更新共享資料
         k_mutex_lock(&motor_data_mutex, K_FOREVER);
         motor_data.cur_sample_time = elapsed_seconds;
-        motor_data.current = filtered_current;
+        motor_data.current = double_filtered_current;
         motor_data.voltage = bus_voltage + shunt_voltage / 1000.0f; // 將分流電壓轉換為伏特並加到總電壓
         k_mutex_unlock(&motor_data_mutex);
 
@@ -900,6 +908,8 @@ void ina219_read_thread_entry(void *arg1, void *arg2, void *arg3) {
         //             (double)current_mA, (double)bus_voltage, 
         //             (double)shunt_voltage, (double)power_mW);
         // }
+
+        bool detected_period = detect_period(&cycle_detector, double_filtered_current, elapsed_seconds, double_filtered_current, motor_data.voltage);
 
         k_sleep(SENSOR_SAMPLE_INTERVAL);
 
@@ -961,9 +971,9 @@ void icm20948_read_thread_entry(void *dummy0, void *dummy1, void *dummy2) {
         k_mutex_unlock(&motor_data_mutex);
         // 輸出資料
         k_mutex_lock(&uart_mutex, K_FOREVER);
-        printf("T1:%.4f\n"
+        printf("T1:%.5f\n"
                "C:%.4f\n"
-               "T2:%.4f\n"
+               "T2:%.5f\n"
                "M:%.4f\n", 
                (double)motor_data.cur_sample_time, 
                (double)motor_data.current, 

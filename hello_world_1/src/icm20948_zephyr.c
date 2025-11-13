@@ -732,3 +732,34 @@ int icm20948_set_acc_dlpf(icm20948_dev_t *dev, icm20948_dlpf_t dlpf) {
     }
     return icm20948_write_register8(dev, 2, ICM20948_ACCEL_CONFIG, dev->reg_val_cache);
 }
+
+int icm20948_enable_acc(icm20948_dev_t *dev, bool enable) {
+    uint8_t val;
+    int ret = icm20948_read_register8(dev, 0, ICM20948_PWR_MGMT_2, &val);
+    if (ret) return ret;
+
+    if (enable) {
+        val &= ~(BIT(3) | BIT(4) | BIT(5));   // 啟用加速度計 XYZ
+    } else {
+        val |=  (BIT(3) | BIT(4) | BIT(5));   // 停用加速度計 XYZ
+    }
+    return icm20948_write_register8(dev, 0, ICM20948_PWR_MGMT_2, val);
+}
+
+int icm20948_enable_gyr(icm20948_dev_t *dev, bool enable) {
+    uint8_t val;
+    int ret = icm20948_read_register8(dev, 0, ICM20948_PWR_MGMT_2, &val);
+    if (ret) return ret;
+
+    if (enable) {
+        val &= ~(BIT(0) | BIT(1) | BIT(2));   // 啟用陀螺儀 XYZ
+    } else {
+        val |=  (BIT(0) | BIT(1) | BIT(2));   // 停用陀螺儀 XYZ
+    }
+    return icm20948_write_register8(dev, 0, ICM20948_PWR_MGMT_2, val);
+}
+
+// 一次關閉 Accel + Gyro（XYZ 全停用）
+int icm20948_disable_accel_and_gyro(icm20948_dev_t *dev) {
+    return icm20948_write_register8(dev, 0, ICM20948_PWR_MGMT_2, 0x3F);
+}
